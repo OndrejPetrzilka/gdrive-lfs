@@ -6,45 +6,36 @@ using Google.Apis.Drive.v3;
 using Google.Apis.Drive.v3.Data;
 using Google.Apis.Services;
 using System.Text.Json.Serialization;
+using System.Diagnostics;
+using Google.Apis.Upload;
 
 namespace GoogleDriveLFS
 {
     internal class Program
     {
-        static readonly JsonSerializerOptions JsonOptions = CreateOptions();
+        static readonly JsonSerializerOptions JsonOptions;
+        static TextWriter? LogStream;
 
-        private static JsonSerializerOptions CreateOptions()
+        static Program()
         {
-            var result = new JsonSerializerOptions();
-            result.IncludeFields = true;
-            result.WriteIndented = false;
-            result.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault;
-            result.Converters.Add(new JsonStringEnumConverter());
-            return result;
+            JsonOptions = new JsonSerializerOptions();
+            JsonOptions.IncludeFields = true;
+            JsonOptions.WriteIndented = false;
+            JsonOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault;
+            JsonOptions.Converters.Add(new JsonStringEnumConverter());
         }
 
         static void Main(string[] args)
         {
-            //string FileName = "c:\\Data\\Projects\\drive-test3\\log.txt";
-            //File.WriteAllLines(FileName, args);
-            //File.AppendAllText(FileName, "\r\n\r\n");
-            //while (true)
-            //{
-            //    string? str = Console.ReadLine();
-            //    if (str == null)
-            //        return;
-            //    File.AppendAllLines(FileName, new string[] { str });
-            //}
-
             string? keyFile = args.Length >= 1 ? args[0] : null;
             string? driveId = args.Length >= 2 ? args[1] : null;
 
-            Console.WriteLine($"Working dir: {Environment.CurrentDirectory}");
+
+            Log($"Working dir: {Environment.CurrentDirectory}");
 
             var accountConfig = JsonSerializer.Deserialize<AccountConfig>(System.IO.File.ReadAllText(keyFile), JsonOptions);
 
-            var initializer = new ServiceAccountCredential.Initializer(accountConfig.client_email);
-            initializer.Scopes = new string[] { DriveService.Scope.Drive };
+            var initializer = new ServiceAccountCredential.Initializer(accountConfig.client_email) { Scopes = new string[] { DriveService.Scope.Drive } };
             ServiceAccountCredential credential = new ServiceAccountCredential(initializer.FromPrivateKey(accountConfig.private_key));
 
             // Create the service.
@@ -57,15 +48,16 @@ namespace GoogleDriveLFS
             }
 
             var activeDrive = service.Teamdrives.Get(driveId).Execute();
-            Console.WriteLine($"Selected drive: {activeDrive.Name}, {activeDrive.Id}");
+            Log($"Selected drive: {activeDrive.Name}, {activeDrive.Id}");
 
             if (args.Length > 2)
             {
+                LogStream = Console.Out;
                 for (int i = 2; i < args.Length; i++)
                 {
                     using (var reader = new StreamReader(args[i]))
                     {
-                        Console.WriteLine($"Progressing commands from: {args[i]}");
+                        Log($"Progressing commands from: {args[i]}");
                         ProcessCommands(service, activeDrive, reader, Console.Out);
                     }
                 }
@@ -76,23 +68,31 @@ namespace GoogleDriveLFS
             }
         }
 
+        private static void Log(string msg)
+        {
+            if (LogStream != null)
+            {
+                LogStream.WriteLine(msg);
+            }
+        }
+
         private static void ListTeamDrives(DriveService service)
         {
-            Console.WriteLine("Listing team drives:");
+            Log("Listing team drives:");
             foreach (var drive in service.Teamdrives.List().Execute().TeamDrives)
             {
-                Console.WriteLine($"{drive.Id}: {drive.Name}");
+                Log($"{drive.Id}: {drive.Name}");
             }
         }
 
         private static void ProcessCommands(DriveService service, TeamDrive drive, TextReader inputCommands, TextWriter output)
         {
-            Console.WriteLine("Processing commands...");
+            Log("Processing commands...");
 
             string? cmdJson;
             while ((cmdJson = inputCommands.ReadLine()) != null)
             {
-                Console.WriteLine("Processing: " + cmdJson);
+                Log("Processing: " + cmdJson);
                 var cmd = JsonSerializer.Deserialize<CommandData>(cmdJson, JsonOptions);
 
                 switch (cmd.@event)
@@ -109,33 +109,73 @@ namespace GoogleDriveLFS
         {
             using (var stream = System.IO.File.OpenRead(path))
             {
-                var driveFile = new Google.Apis.Drive.v3.Data.File();
-                driveFile.Name = oid;
-                driveFile.MimeType = "application/octet-stream";
-                driveFile.DriveId = drive.Id;
-                driveFile.Parents = new string[] { drive.Id };
+                var listRequest = service.Files.List();
+                listRequest.Q = $"name='{oid}'";
+                listRequest.Fields = "files(id)";
+                listRequest.Corpora = "drive";
+                listRequest.DriveId = drive.Id;
+                listRequest.IncludeItemsFromAllDrives = true;
+                listRequest.SupportsAllDrives = true;
+                var list = listRequest.Execute();
 
-                var request = service.Files.Create(driveFile, stream, "application/octet-stream");
-                request.SupportsAllDrives = true;
-                request.Fields = "id";
+                ResumableUpload<Google.Apis.Drive.v3.Data.File, Google.Apis.Drive.v3.Data.File> request;
+
+                if (list.Files.Count > 0)
+                {
+                    string fileId = list.Files[0].Id;
+
+                    // Only include fields which should be changed
+                    var file = new Google.Apis.Drive.v3.Data.File();
+                    file.MimeType = "application/octet-stream";
+
+                    var updateRequest = service.Files.Update(file, fileId, stream, "application/octet-stream");
+                    updateRequest.SupportsAllDrives = true;
+                    request = updateRequest;
+                }
+                else
+                {
+                    var driveFile = new Google.Apis.Drive.v3.Data.File();
+                    driveFile.Name = oid;
+                    driveFile.MimeType = "application/octet-stream";
+                    driveFile.DriveId = drive.Id;
+                    driveFile.Parents = new string[] { drive.Id };
+
+                    var createRequest = service.Files.Create(driveFile, stream, "application/octet-stream");
+                    createRequest.SupportsAllDrives = true;
+                    createRequest.Fields = "id";
+                    request = createRequest;
+                }
+
+                long bytes = 0;
+                request.ProgressChanged += progress =>
+                {
+                    ReportProgress(output, oid, progress.BytesSent, progress.BytesSent - bytes);
+                    bytes = progress.BytesSent;
+                };
 
                 var response = request.Upload();
-                if (response.Status != Google.Apis.Upload.UploadStatus.Completed)
-                    throw response.Exception;
-
-                ReportComplete(output, oid, null);
-                //return request.ResponseBody.Id;
+                if (response.Status != UploadStatus.Completed)
+                {
+                    ReportError(output, oid, 3, $"Upload failed: {response.Exception.Message}");
+                }
+                else
+                {
+                    Log($"File uploaded: {request.ResponseBody.Id}");
+                    ReportComplete(output, oid, null);
+                }
             }
         }
 
         private static void HandleDownload(DriveService service, TeamDrive drive, string oid, long size, ActionData action, TextWriter output)
         {
-            var request = service.Files.List();
-            request.Q = $"name='{oid}'";
-            request.IncludeItemsFromAllDrives = true;
-            request.Fields = "files(id, name, size, mimeType)";
-            request.SupportsAllDrives = true;
-            var list = request.Execute();
+            var listRequest = service.Files.List();
+            listRequest.Q = $"name='{oid}'";
+            listRequest.Fields = "files(id)";
+            listRequest.Corpora = "drive";
+            listRequest.DriveId = drive.Id;
+            listRequest.IncludeItemsFromAllDrives = true;
+            listRequest.SupportsAllDrives = true;
+            var list = listRequest.Execute();
             if (list.Files.Count == 0)
             {
                 ReportError(output, oid, 2, "File not found");
@@ -149,42 +189,47 @@ namespace GoogleDriveLFS
                 var getRequest = service.Files.Get(file.Id);
                 getRequest.SupportsAllDrives = true;
 
+                long bytes = 0;
+                getRequest.MediaDownloader.ProgressChanged += progress =>
+                {
+                    ReportProgress(output, oid, progress.BytesDownloaded, progress.BytesDownloaded - bytes);
+                    bytes = progress.BytesDownloaded;
+                };
+
                 var progress = getRequest.DownloadWithStatus(stream);
-                long lastBytes = 0;
-                while (progress.Status == Google.Apis.Download.DownloadStatus.Downloading || progress.Status == Google.Apis.Download.DownloadStatus.NotStarted)
-                {
-                    ReportProgress(output, oid, progress.BytesDownloaded, progress.BytesDownloaded - lastBytes);
-                    lastBytes = progress.BytesDownloaded;
-                    Thread.Sleep(1000);
-                }
-                if (progress.Status == Google.Apis.Download.DownloadStatus.Completed)
-                {
-                    ReportComplete(output, oid, path);
-                }
-                else if (progress.Status == Google.Apis.Download.DownloadStatus.Failed)
+                if (progress.Status != Google.Apis.Download.DownloadStatus.Completed)
                 {
                     ReportError(output, oid, 3, $"Download failed: {progress.Exception.Message}");
-                    throw progress.Exception;
+                }
+                else
+                {
+                    ReportComplete(output, oid, path);
                 }
             }
         }
 
+        private static void SendCommand(TextWriter output, string cmd)
+        {
+            if (output != LogStream)
+            {
+                Log("-> " + cmd);
+            }
+            output.WriteLine(cmd);
+        }
+
         private static void ReportProgress(TextWriter output, string oid, long bytesSoFar, long bytesSinceLast)
         {
-            output.Write("  ");
-            output.WriteLine(JsonSerializer.Serialize(new CommandData { @event = CommandKind.progress, oid = oid, bytesSoFar = bytesSoFar, bytesSinceLast = bytesSinceLast }, JsonOptions));
+            SendCommand(output, JsonSerializer.Serialize(new CommandData { @event = CommandKind.progress, oid = oid, bytesSoFar = bytesSoFar, bytesSinceLast = bytesSinceLast }, JsonOptions));
         }
 
         private static void ReportError(TextWriter output, string oid, int code, string message)
         {
-            output.Write("  ");
-            output.WriteLine(JsonSerializer.Serialize(new CommandData { @event = CommandKind.complete, oid = oid, error = new ErrorData { code = code, message = message } }, JsonOptions));
+            SendCommand(output, JsonSerializer.Serialize(new CommandData { @event = CommandKind.complete, oid = oid, error = new ErrorData { code = code, message = message } }, JsonOptions));
         }
 
         private static void ReportComplete(TextWriter output, string oid, string path)
         {
-            output.Write("  ");
-            output.WriteLine(JsonSerializer.Serialize(new CommandData { @event = CommandKind.complete, oid = oid, path = path }, JsonOptions));
+            SendCommand(output, JsonSerializer.Serialize(new CommandData { @event = CommandKind.complete, oid = oid, path = path }, JsonOptions));
         }
     }
 }
