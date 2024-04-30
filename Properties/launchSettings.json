@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "GoogleDriveLFS": {
+      "commandName": "Project",
+      "commandLineArgs": "keys.json 0ACFj5QfFhUS8Uk9PVA test_download.txt"
+    }
+  }
+}
