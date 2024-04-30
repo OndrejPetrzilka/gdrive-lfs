@@ -9,6 +9,7 @@ using System.Text.Json.Serialization;
 using System.Diagnostics;
 using Google.Apis.Upload;
 using System.Collections;
+using Google.Apis.Download;
 
 namespace GoogleDriveLFS
 {
@@ -237,6 +238,7 @@ namespace GoogleDriveLFS
                 return;
             }
 
+            IDownloadProgress? progress;
             var path = Path.GetTempFileName();
             using (var stream = System.IO.File.Create(path))
             {
@@ -251,15 +253,16 @@ namespace GoogleDriveLFS
                     bytes = progress.BytesDownloaded;
                 };
 
-                var progress = getRequest.DownloadWithStatus(stream);
-                if (progress.Status != Google.Apis.Download.DownloadStatus.Completed)
-                {
-                    ReportError(output, oid, 3, $"Download failed: {progress.Exception.Message}");
-                }
-                else
-                {
-                    ReportComplete(output, oid, path);
-                }
+                progress = getRequest.DownloadWithStatus(stream);
+            }
+
+            if (progress.Status != DownloadStatus.Completed)
+            {
+                ReportError(output, oid, 3, $"Download failed: {progress.Exception.Message}");
+            }
+            else
+            {
+                ReportComplete(output, oid, path);
             }
         }
 
