@@ -34,7 +34,7 @@ namespace GoogleDriveLFS
     }
 
     [Serializable]
-    public struct ActionData
+    public class ActionData
     {
         public string href;
         public Dictionary<string, string> header;

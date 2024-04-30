@@ -51,9 +51,9 @@ namespace GoogleDriveLFS
             ServiceAccountCredential credential = new ServiceAccountCredential(initializer.FromPrivateKey(config.private_key));
 
             // Create the service.
-            using (var log = OpenLog(config.log_path))
+            //using (var log = OpenLog(config.log_path))
             {
-                LogStream = log;
+                //LogStream = log;
 
                 using (var service = new DriveService(new BaseClientService.Initializer() { HttpClientInitializer = credential, ApplicationName = "GoogleDriveLFS" }))
                 {
@@ -62,12 +62,6 @@ namespace GoogleDriveLFS
                     {
                         ListTeamDrives(service);
                         return;
-                    }
-
-                    Log("Env vars:");
-                    foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables().OfType<DictionaryEntry>().OrderBy(s => s.Key))
-                    {
-                        Log($"  {entry.Key} = {entry.Value}");
                     }
 
                     Log($"Working directory: {Environment.CurrentDirectory}");
@@ -139,11 +133,12 @@ namespace GoogleDriveLFS
 
         private static void Log(string msg)
         {
-            if (LogStream != null)
-            {
-                LogStream.WriteLine(msg);
-                LogStream.Flush();
-            }
+            Console.Error.WriteLine(msg);
+            //if (LogStream != null)
+            //{
+            //    LogStream.WriteLine(msg);
+            //    LogStream.Flush();
+            //}
         }
 
         private static void ListTeamDrives(DriveService service)
