@@ -14,7 +14,7 @@ namespace GoogleDriveLFS
 {
     internal class Program
     {
-        const string ConfigName = "GoogleDriveLFS.json";
+        const string ConfigName = ".gdrivelfs";
         static readonly JsonSerializerOptions JsonOptions;
         static TextWriter? LogStream;
 
@@ -29,7 +29,7 @@ namespace GoogleDriveLFS
 
         static void Main(string[] args)
         {
-            var configPath = GetConfigPath(args);
+            var configPath = args.Length > 0 ? args[0] : ConfigName;
             if (string.IsNullOrEmpty(configPath))
             {
                 Console.Error.WriteLine($"{ConfigName} not found, working directory: {Environment.CurrentDirectory}");
@@ -101,23 +101,6 @@ namespace GoogleDriveLFS
                 logPath = Path.ChangeExtension(logPath, $"{Process.GetCurrentProcess().Id}" + Path.GetExtension(logPath));
             }
             return logPath != null ? System.IO.File.CreateText(logPath) : null;
-        }
-
-        static string? GetConfigPath(string[] args)
-        {
-            if (args.Length > 0)
-            {
-                return args[0];
-            }
-            else if (System.IO.File.Exists(ConfigName))
-            {
-                return ConfigName;
-            }
-            else if (TryGetCurrentDirConfig(out string path))
-            {
-                return path;
-            }
-            return null;
         }
 
         private static bool TryGetCurrentDirConfig(out string path)
