@@ -1,0 +1,4 @@
+{ "event": "init", "operation": "download", "remote": "origin", "concurrent": true, "concurrenttransfers": 3 }
+{ "event": "download", "oid": "bf3e3e2af9366a3b704ae0c31de5afa64193ebabffde2091936ad2e7510bc03a", "size": 73769, "action": { "href": "nfs://server/path", "header": { "key": "value" } } }
+{ "event": "download", "oid": "ff3e3e2af9366a3b704ae0c31de5afa64193ebabffde2091936ad2e7510bc03a", "size": 73769, "action": { "href": "nfs://server/path", "header": { "key": "value" } } }
+{ "event": "terminate" }
