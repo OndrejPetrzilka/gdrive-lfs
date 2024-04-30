@@ -8,11 +8,13 @@ using Google.Apis.Services;
 using System.Text.Json.Serialization;
 using System.Diagnostics;
 using Google.Apis.Upload;
+using System.Collections;
 
 namespace GoogleDriveLFS
 {
     internal class Program
     {
+        const string ConfigName = "GoogleDriveLFS.json";
         static readonly JsonSerializerOptions JsonOptions;
         static TextWriter? LogStream;
 
@@ -27,45 +29,112 @@ namespace GoogleDriveLFS
 
         static void Main(string[] args)
         {
-            string? keyFile = args.Length >= 1 ? args[0] : null;
-            string? driveId = args.Length >= 2 ? args[1] : null;
-
-
-            Log($"Working dir: {Environment.CurrentDirectory}");
-
-            var accountConfig = JsonSerializer.Deserialize<AccountConfig>(System.IO.File.ReadAllText(keyFile), JsonOptions);
-
-            var initializer = new ServiceAccountCredential.Initializer(accountConfig.client_email) { Scopes = new string[] { DriveService.Scope.Drive } };
-            ServiceAccountCredential credential = new ServiceAccountCredential(initializer.FromPrivateKey(accountConfig.private_key));
-
-            // Create the service.
-            var service = new DriveService(new BaseClientService.Initializer() { HttpClientInitializer = credential, ApplicationName = "GoogleDriveLFS" });
-
-            if (driveId == null)
+            var configPath = GetConfigPath(args);
+            if (string.IsNullOrEmpty(configPath))
             {
-                ListTeamDrives(service);
+                Console.Error.WriteLine($"{ConfigName} not found, working directory: {Environment.CurrentDirectory}");
                 return;
             }
 
-            var activeDrive = service.Teamdrives.Get(driveId).Execute();
-            Log($"Selected drive: {activeDrive.Name}, {activeDrive.Id}");
+            var config = JsonSerializer.Deserialize<Config>(System.IO.File.ReadAllText(configPath), JsonOptions);
 
-            if (args.Length > 2)
+            if (config.attach_debugger)
             {
-                LogStream = Console.Out;
-                for (int i = 2; i < args.Length; i++)
+                while (!Debugger.IsAttached)
                 {
-                    using (var reader = new StreamReader(args[i]))
+                    Thread.Sleep(1000);
+                }
+                Debugger.Break();
+            }
+
+            var initializer = new ServiceAccountCredential.Initializer(config.client_email) { Scopes = new string[] { DriveService.Scope.Drive } };
+            ServiceAccountCredential credential = new ServiceAccountCredential(initializer.FromPrivateKey(config.private_key));
+
+            // Create the service.
+            using (var log = OpenLog(config.log_path))
+            {
+                LogStream = log;
+
+                using (var service = new DriveService(new BaseClientService.Initializer() { HttpClientInitializer = credential, ApplicationName = "GoogleDriveLFS" }))
+                {
+
+                    if (config.drive_id == null)
                     {
-                        Log($"Progressing commands from: {args[i]}");
-                        ProcessCommands(service, activeDrive, reader, Console.Out);
+                        ListTeamDrives(service);
+                        return;
+                    }
+
+                    Log("Env vars:");
+                    foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables().OfType<DictionaryEntry>().OrderBy(s => s.Key))
+                    {
+                        Log($"  {entry.Key} = {entry.Value}");
+                    }
+
+                    Log($"Working directory: {Environment.CurrentDirectory}");
+
+                    if (config.input_files != null)
+                    {
+                        foreach (var file in config.input_files)
+                        {
+                            using (var reader = new StreamReader(file))
+                            {
+                                Log($"Progressing commands from: {file}");
+                                ProcessCommands(service, config.drive_id, reader, Console.Out);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Log($"Progressing commands from STDIN, STDIN Redirected {Console.IsInputRedirected}, STDOUT Redirected {Console.IsOutputRedirected}");
+                        //using (var input = Console.IsInputRedirected ? new StreamReader(Console.OpenStandardInput(65536)) : Console.In)
+                        //using (var output = Console.IsOutputRedirected ? new StreamWriter(Console.OpenStandardOutput(65536)) : Console.Out)
+                        {
+                            ProcessCommands(service, config.drive_id, Console.In, Console.Out);
+                        }
                     }
                 }
             }
-            else
+        }
+
+        private static StreamWriter? OpenLog(string logPath)
+        {
+            if (logPath != null && Environment.ProcessPath != null)
             {
-                ProcessCommands(service, activeDrive, Console.In, Console.Out);
+                logPath = logPath.Replace("~", Path.GetDirectoryName(Environment.ProcessPath));
             }
+            if (logPath != null)
+            {
+                logPath = Path.ChangeExtension(logPath, $"{Process.GetCurrentProcess().Id}" + Path.GetExtension(logPath));
+            }
+            return logPath != null ? System.IO.File.CreateText(logPath) : null;
+        }
+
+        static string? GetConfigPath(string[] args)
+        {
+            if (args.Length > 0)
+            {
+                return args[0];
+            }
+            else if (System.IO.File.Exists(ConfigName))
+            {
+                return ConfigName;
+            }
+            else if (TryGetCurrentDirConfig(out string path))
+            {
+                return path;
+            }
+            return null;
+        }
+
+        private static bool TryGetCurrentDirConfig(out string path)
+        {
+            if (Environment.ProcessPath != null)
+            {
+                path = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), ConfigName);
+                return System.IO.File.Exists(path);
+            }
+            path = null;
+            return false;
         }
 
         private static void Log(string msg)
@@ -73,6 +142,7 @@ namespace GoogleDriveLFS
             if (LogStream != null)
             {
                 LogStream.WriteLine(msg);
+                LogStream.Flush();
             }
         }
 
@@ -85,27 +155,34 @@ namespace GoogleDriveLFS
             }
         }
 
-        private static void ProcessCommands(DriveService service, TeamDrive drive, TextReader inputCommands, TextWriter output)
+        private static void ProcessCommands(DriveService service, string driveId, TextReader inputCommands, TextWriter output)
         {
             Log("Processing commands...");
 
-            string? cmdJson;
-            while ((cmdJson = inputCommands.ReadLine()) != null)
+            while (true)
             {
+                string? cmdJson = inputCommands.ReadLine();
+                if (string.IsNullOrWhiteSpace(cmdJson))
+                {
+                    Thread.Sleep(100);
+                    continue;
+                }
+
                 Log("Processing: " + cmdJson);
                 var cmd = JsonSerializer.Deserialize<CommandData>(cmdJson, JsonOptions);
 
                 switch (cmd.@event)
                 {
-                    case CommandKind.init: break;
-                    case CommandKind.upload: HandleUpload(service, drive, cmd.oid, cmd.size, cmd.path, cmd.action, output); break;
-                    case CommandKind.download: HandleDownload(service, drive, cmd.oid, cmd.size, cmd.action, output); break;
-                    case CommandKind.terminate: return;
+                    case CommandKind.init: SendCommand(output, "{ }"); break;
+                    case CommandKind.upload: HandleUpload(service, driveId, cmd.oid, cmd.size, cmd.path, cmd.action, output); break;
+                    case CommandKind.download: HandleDownload(service, driveId, cmd.oid, cmd.size, cmd.action, output); break;
+                    case CommandKind.terminate: Log("Processing commands...done"); return;
                 }
             }
+            ;
         }
 
-        private static void HandleUpload(DriveService service, TeamDrive drive, string oid, long size, string path, ActionData action, TextWriter output)
+        private static void HandleUpload(DriveService service, string driveId, string oid, long size, string path, ActionData action, TextWriter output)
         {
             using (var stream = System.IO.File.OpenRead(path))
             {
@@ -113,7 +190,7 @@ namespace GoogleDriveLFS
                 listRequest.Q = $"name='{oid}'";
                 listRequest.Fields = "files(id)";
                 listRequest.Corpora = "drive";
-                listRequest.DriveId = drive.Id;
+                listRequest.DriveId = driveId;
                 listRequest.IncludeItemsFromAllDrives = true;
                 listRequest.SupportsAllDrives = true;
                 var list = listRequest.Execute();
@@ -137,8 +214,8 @@ namespace GoogleDriveLFS
                     var driveFile = new Google.Apis.Drive.v3.Data.File();
                     driveFile.Name = oid;
                     driveFile.MimeType = "application/octet-stream";
-                    driveFile.DriveId = drive.Id;
-                    driveFile.Parents = new string[] { drive.Id };
+                    driveFile.DriveId = driveId;
+                    driveFile.Parents = new string[] { driveId };
 
                     var createRequest = service.Files.Create(driveFile, stream, "application/octet-stream");
                     createRequest.SupportsAllDrives = true;
@@ -166,13 +243,13 @@ namespace GoogleDriveLFS
             }
         }
 
-        private static void HandleDownload(DriveService service, TeamDrive drive, string oid, long size, ActionData action, TextWriter output)
+        private static void HandleDownload(DriveService service, string driveId, string oid, long size, ActionData action, TextWriter output)
         {
             var listRequest = service.Files.List();
             listRequest.Q = $"name='{oid}'";
             listRequest.Fields = "files(id)";
             listRequest.Corpora = "drive";
-            listRequest.DriveId = drive.Id;
+            listRequest.DriveId = driveId;
             listRequest.IncludeItemsFromAllDrives = true;
             listRequest.SupportsAllDrives = true;
             var list = listRequest.Execute();
@@ -214,7 +291,8 @@ namespace GoogleDriveLFS
             {
                 Log("-> " + cmd);
             }
-            output.WriteLine(cmd);
+            output.Write(cmd + "\n");
+            output.Flush();
         }
 
         private static void ReportProgress(TextWriter output, string oid, long bytesSoFar, long bytesSinceLast)
