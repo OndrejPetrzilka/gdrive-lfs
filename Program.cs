@@ -282,17 +282,7 @@ namespace GoogleDriveLFS
         {
             // Git LFS uses rename to move tmp files to their destination. But rename does not work across
             // drives, so we have to make sure that the tmp file is on the same drive as the repository.
-            var tmpPath = Path.GetTempFileName();
-            var tmpDrive = Path.GetPathRoot(tmpPath);
-
             var pwd = Directory.GetCurrentDirectory();
-            var pwdDrive = Path.GetPathRoot(pwd);
-
-            if (pwdDrive == tmpDrive)
-            {
-                return tmpPath;
-            }
-
             var tmpDir = Path.Combine(pwd, ".tmplfs");
             if (!Directory.Exists(tmpDir))
             {
