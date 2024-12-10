@@ -238,9 +238,21 @@ namespace GoogleDriveLFS
                 return;
             }
 
+            string tmpPath = "";
+            FileStream? stream = default;
+            try
+            {
+                tmpPath = GetLfsTempFile(oid);
+                stream = System.IO.File.Create(tmpPath);
+            }
+            catch (Exception e)
+            {
+                ReportError(output, oid, 4, "Could not create temporary file " + e.Message);
+                return;
+            }
+
             IDownloadProgress? progress;
-            var path = Path.GetTempFileName();
-            using (var stream = System.IO.File.Create(path))
+            using (stream)
             {
                 var file = list.Files[0];
                 var getRequest = service.Files.Get(file.Id);
@@ -262,8 +274,31 @@ namespace GoogleDriveLFS
             }
             else
             {
-                ReportComplete(output, oid, path);
+                ReportComplete(output, oid, tmpPath);
             }
+        }
+
+        private static string GetLfsTempFile(string oid)
+        {
+            // Git LFS uses rename to move tmp files to their destination. But rename does not work across
+            // drives, so we have to make sure that the tmp file is on the same drive as the repository.
+            var tmpPath = Path.GetTempFileName();
+            var tmpDrive = Path.GetPathRoot(tmpPath);
+
+            var pwd = Directory.GetCurrentDirectory();
+            var pwdDrive = Path.GetPathRoot(pwd);
+
+            if (pwdDrive == tmpDrive)
+            {
+                return tmpPath;
+            }
+
+            var tmpDir = Path.Combine(pwd, ".tmplfs");
+            if (!Directory.Exists(tmpDir))
+            {
+                Directory.CreateDirectory(tmpDir);
+            }
+            return Path.Combine(tmpDir, oid);
         }
 
         private static void SendCommand(TextWriter output, string cmd)
