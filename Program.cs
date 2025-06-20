@@ -15,9 +15,20 @@ namespace GoogleDriveLFS
 {
     internal class Program
     {
+        enum ErrorCode
+        {
+            ConfigFileError = 1,
+            FileNotFound = 2,
+            DownloadError = 3,
+            UploadError = 4,
+            CannotCreateTmpFile = 5,
+            UnhandledException = 9,
+        }
+
         const string ConfigName = ".gdrivelfs";
         static readonly JsonSerializerOptions JsonOptions;
         static TextWriter? LogStream;
+        static string? CurrentOid = null;
 
         static Program()
         {
@@ -30,14 +41,18 @@ namespace GoogleDriveLFS
 
         static void Main(string[] args)
         {
-            var configPath = args.Length > 0 ? args[0] : ConfigName;
-            if (string.IsNullOrEmpty(configPath))
+            var configPath = args.Length > 0 && !string.IsNullOrEmpty(args[0]) ? args[0] : ConfigName;
+
+            Config config;
+            try
             {
-                Console.Error.WriteLine($"{ConfigName} not found, working directory: {Environment.CurrentDirectory}");
+                config = JsonSerializer.Deserialize<Config>(System.IO.File.ReadAllText(configPath), JsonOptions);
+            }
+            catch (Exception e)
+            {
+                ReportError(ErrorCode.ConfigFileError, $"Error reading config file: {configPath}\r\n{e}");
                 return;
             }
-
-            var config = JsonSerializer.Deserialize<Config>(System.IO.File.ReadAllText(configPath), JsonOptions);
 
             if (config.attach_debugger)
             {
@@ -46,6 +61,10 @@ namespace GoogleDriveLFS
                     Thread.Sleep(1000);
                 }
                 Debugger.Break();
+            }
+            else
+            {
+                AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
             }
 
             var initializer = new ServiceAccountCredential.Initializer(config.client_email) { Scopes = new string[] { DriveService.Scope.Drive } };
@@ -91,28 +110,22 @@ namespace GoogleDriveLFS
             }
         }
 
+        private static void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            ReportError(ErrorCode.UnhandledException, e.ExceptionObject?.ToString() ?? "ExceptionObject is null");
+        }
+
         private static StreamWriter? OpenLog(string logPath)
         {
-            if (logPath != null && Environment.ProcessPath != null)
+            if (!string.IsNullOrEmpty(logPath) && Environment.ProcessPath != null)
             {
                 logPath = logPath.Replace("~", Path.GetDirectoryName(Environment.ProcessPath));
             }
-            if (logPath != null)
+            if (!string.IsNullOrEmpty(logPath))
             {
                 logPath = Path.ChangeExtension(logPath, $"{Process.GetCurrentProcess().Id}" + Path.GetExtension(logPath));
             }
-            return logPath != null ? System.IO.File.CreateText(logPath) : null;
-        }
-
-        private static bool TryGetCurrentDirConfig(out string path)
-        {
-            if (Environment.ProcessPath != null)
-            {
-                path = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), ConfigName);
-                return System.IO.File.Exists(path);
-            }
-            path = null;
-            return false;
+            return !string.IsNullOrEmpty(logPath) ? System.IO.File.CreateText(logPath) : null;
         }
 
         private static void Log(string msg)
@@ -123,6 +136,15 @@ namespace GoogleDriveLFS
             //    LogStream.WriteLine(msg);
             //    LogStream.Flush();
             //}
+        }
+
+        private static void ReportError(ErrorCode errorCode, string msg)
+        {
+            // Report error for command line
+            Console.Error.WriteLine($"[{(int)errorCode}] {msg}");
+
+            // Report error to GitLFS
+            ReportError(Console.Out, CurrentOid ?? "0", errorCode, msg);
         }
 
         private static void ListTeamDrives(DriveService service)
@@ -150,6 +172,7 @@ namespace GoogleDriveLFS
                 Log("Processing: " + cmdJson);
                 var cmd = JsonSerializer.Deserialize<CommandData>(cmdJson, JsonOptions);
 
+                CurrentOid = cmd.oid;
                 switch (cmd.@event)
                 {
                     case CommandKind.init: SendCommand(output, "{ }"); break;
@@ -157,8 +180,8 @@ namespace GoogleDriveLFS
                     case CommandKind.download: HandleDownload(service, driveId, cmd.oid, cmd.size, cmd.action, output); break;
                     case CommandKind.terminate: Log("Processing commands...done"); return;
                 }
+                CurrentOid = null;
             }
-            ;
         }
 
         private static void HandleUpload(DriveService service, string driveId, string oid, long size, string path, ActionData action, TextWriter output)
@@ -212,7 +235,8 @@ namespace GoogleDriveLFS
                 var response = request.Upload();
                 if (response.Status != UploadStatus.Completed)
                 {
-                    ReportError(output, oid, 3, $"Upload failed: {response.Exception.Message}");
+                    string exception = response.Exception != null ? response.Exception.ToString() : "-null-";
+                    ReportError(output, oid, ErrorCode.UploadError, $"Upload failed, status: {response.Status}, bytes: {response.BytesSent}/{size}, exception: {exception}");
                 }
                 else
                 {
@@ -234,7 +258,7 @@ namespace GoogleDriveLFS
             var list = listRequest.Execute();
             if (list.Files.Count == 0)
             {
-                ReportError(output, oid, 2, "File not found");
+                ReportError(output, oid, ErrorCode.FileNotFound, $"File {oid} not found");
                 return;
             }
 
@@ -247,10 +271,9 @@ namespace GoogleDriveLFS
             }
             catch (Exception e)
             {
-                ReportError(output, oid, 4, "Could not create temporary file " + e.Message);
+                ReportError(output, oid, ErrorCode.CannotCreateTmpFile, $"Could not create temporary file:\r\n{e}");
                 return;
             }
-
             IDownloadProgress? progress;
             using (stream)
             {
@@ -270,7 +293,8 @@ namespace GoogleDriveLFS
 
             if (progress.Status != DownloadStatus.Completed)
             {
-                ReportError(output, oid, 3, $"Download failed: {progress.Exception.Message}");
+                string exception = progress.Exception != null ? progress.Exception.ToString() : "-null-";
+                ReportError(output, oid, ErrorCode.DownloadError, $"Download failed, status: {progress.Status}, bytes: {progress.BytesDownloaded}/{size}, exception: {exception}");
             }
             else
             {
@@ -306,9 +330,9 @@ namespace GoogleDriveLFS
             SendCommand(output, JsonSerializer.Serialize(new CommandData { @event = CommandKind.progress, oid = oid, bytesSoFar = bytesSoFar, bytesSinceLast = bytesSinceLast }, JsonOptions));
         }
 
-        private static void ReportError(TextWriter output, string oid, int code, string message)
+        private static void ReportError(TextWriter output, string oid, ErrorCode code, string message)
         {
-            SendCommand(output, JsonSerializer.Serialize(new CommandData { @event = CommandKind.complete, oid = oid, error = new ErrorData { code = code, message = message } }, JsonOptions));
+            SendCommand(output, JsonSerializer.Serialize(new CommandData { @event = CommandKind.complete, oid = oid, error = new ErrorData { code = (int)code, message = message } }, JsonOptions));
         }
 
         private static void ReportComplete(TextWriter output, string oid, string path)
